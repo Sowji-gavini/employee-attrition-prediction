@@ -1,131 +1,130 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
-import shap
+import seaborn as sns
 import matplotlib.pyplot as plt
 
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+
 # -----------------------------
-# CONFIG
+# PAGE CONFIG
 # -----------------------------
 st.set_page_config(page_title="Employee Attrition Predictor", layout="wide")
-st.title("💼 Employee Attrition Prediction System")
+st.title("💼 Employee Attrition Prediction & Segmentation")
 
 # -----------------------------
-# LOAD MODELS
+# TRAIN MODEL (CACHED)
 # -----------------------------
-model = joblib.load('saved_models/best_model.pkl')
-scaler = joblib.load('saved_models/scaler.pkl')
-feature_cols = joblib.load('saved_models/feature_columns.pkl')
-kmeans = joblib.load('saved_models/kmeans.pkl')
-pca = joblib.load('saved_models/pca.pkl')
+@st.cache_resource
+def train_model():
+
+    df = pd.read_csv("/Users/gavinisowjanya/Downloads/employee_attrition_dataset.csv")
+
+    df.dropna(inplace=True)
+
+    le = LabelEncoder()
+    df['Gender'] = le.fit_transform(df['Gender'])
+    df['Marital_Status'] = le.fit_transform(df['Marital_Status'])
+    df['Overtime'] = le.fit_transform(df['Overtime'])
+
+    df['Attrition'] = df['Attrition'].map({'Yes':1,'No':0})
+
+    df = pd.get_dummies(df, columns=['Department','Job_Role'], drop_first=True)
+
+    X = df.drop('Attrition', axis=1)
+    y = df['Attrition']
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.2, random_state=42
+    )
+
+    models = {
+        "Logistic Regression": LogisticRegression(max_iter=1000),
+        "Decision Tree": DecisionTreeClassifier(),
+        "Random Forest": RandomForestClassifier(),
+        "XGBoost": XGBClassifier(use_label_encoder=False, eval_metric='logloss')
+    }
+
+    for model in models.values():
+        model.fit(X_train, y_train)
+
+    # Unsupervised
+    kmeans = KMeans(n_clusters=3, random_state=42)
+    clusters = kmeans.fit_predict(X_scaled)
+
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(X_scaled)
+
+    return models, scaler, X.columns, kmeans, pca, X_pca, clusters
+
+
+models, scaler, columns, kmeans, pca, X_pca, clusters = train_model()
 
 # -----------------------------
-# SIDEBAR INPUT (CLEAN UI)
+# SIDEBAR INPUT
 # -----------------------------
-st.sidebar.header("🧾 Employee Details")
+st.sidebar.header("Enter Employee Details")
 
 def user_input():
-    age = st.sidebar.slider("Age", 18, 60, 30)
-    income = st.sidebar.number_input("Monthly Income", 1000, 50000, 5000)
-    years = st.sidebar.slider("Years at Company", 0, 40, 5)
-
-    gender = st.sidebar.selectbox("Gender", ["Male", "Female"])
-    overtime = st.sidebar.selectbox("Overtime", ["Yes", "No"])
-    marital = st.sidebar.selectbox("Marital Status", ["Single", "Married", "Divorced"])
-
-    dept = st.sidebar.selectbox("Department", ["Sales", "HR", "R&D"])
-    role = st.sidebar.selectbox("Job Role", [
-        "Manager","Sales Executive","Research Scientist",
-        "Laboratory Technician","HR","Sales Representative"
-    ])
-
-    job_sat = st.sidebar.slider("Job Satisfaction", 1, 4, 3)
-    work_life = st.sidebar.slider("Work-Life Balance", 1, 4, 3)
-    performance = st.sidebar.slider("Performance Rating", 1, 5, 3)
-
-    # Convert to dataframe
-    data = pd.DataFrame({
-        'Age':[age],
-        'Monthly_Income':[income],
-        'Years_at_Company':[years],
-        'Gender':[1 if gender=="Male" else 0],
-        'Overtime':[1 if overtime=="Yes" else 0],
-        'Marital_Status':[marital],
-        'Job_Satisfaction':[job_sat],
-        'Work_Life_Balance':[work_life],
-        'Performance_Rating':[performance],
-        'Department':[dept],
-        'Job_Role':[role]
-    })
-
-    return data
+    data = {}
+    for col in columns:
+        data[col] = st.sidebar.number_input(col, value=0.0)
+    return pd.DataFrame([data])
 
 input_df = user_input()
 
-# -----------------------------
-# PREPROCESS INPUT (MATCH TRAINING)
-# -----------------------------
-def preprocess_input(df):
-    
-    # One-hot encoding
-    df = pd.get_dummies(df)
+# Align columns
+input_df = input_df.reindex(columns=columns, fill_value=0)
 
-    # Align with training columns
-    df = df.reindex(columns=feature_cols, fill_value=0)
-
-    return df
-
-processed = preprocess_input(input_df)
-scaled = scaler.transform(processed)
+scaled = scaler.transform(input_df)
 
 # -----------------------------
-# PREDICTION
+# PREDICTIONS
 # -----------------------------
-st.subheader("📊 Prediction")
+st.subheader("📊 Prediction Probabilities")
 
-prob = model.predict_proba(scaled)[0][1]
-pred = model.predict(scaled)[0]
+pred_results = {}
+for name, model in models.items():
+    prob = model.predict_proba(scaled)[0][1]
+    pred_results[name] = prob
 
-col1, col2 = st.columns(2)
+st.bar_chart(pred_results)
 
-with col1:
-    st.metric("Attrition Probability", f"{prob:.2f}")
+# Final prediction (Random Forest)
+final_pred = models["Random Forest"].predict(scaled)[0]
 
-with col2:
-    if pred == 1:
-        st.error("⚠️ High Risk Employee")
-    else:
-        st.success("✅ Likely to Stay")
+if final_pred == 1:
+    st.error("⚠️ High Risk of Attrition")
+else:
+    st.success("✅ Likely to Stay")
 
 # -----------------------------
-# CLUSTERING
+# CLUSTER
 # -----------------------------
 cluster = kmeans.predict(scaled)[0]
-st.info(f"📌 Employee belongs to Cluster: {cluster}")
+st.info(f"Cluster Group: {cluster}")
 
 # -----------------------------
 # PCA VISUALIZATION
 # -----------------------------
-st.subheader("📉 Employee Position (PCA)")
-
-user_pca = pca.transform(scaled)
+st.subheader("📉 PCA Visualization")
 
 fig, ax = plt.subplots()
-ax.scatter(user_pca[:,0], user_pca[:,1])
-ax.set_title("Employee in PCA Space")
+ax.scatter(X_pca[:,0], X_pca[:,1], c=clusters, alpha=0.5)
+
+user_point = pca.transform(scaled)
+ax.scatter(user_point[:,0], user_point[:,1], c='red', s=100)
+
+ax.set_title("Employee Segmentation")
 
 st.pyplot(fig)
-
-# -----------------------------
-# SHAP EXPLAINABILITY
-# -----------------------------
-st.subheader("🔍 Why this prediction? (SHAP)")
-
-explainer = shap.Explainer(model)
-shap_values = explainer(processed)
-
-fig, ax = plt.subplots()
-shap.plots.waterfall(shap_values[0, :, 1], show=False)
-st.pyplot(fig)
-
